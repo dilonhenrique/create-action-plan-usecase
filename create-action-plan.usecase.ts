@@ -2,6 +2,76 @@
 export class CreateActionPlanUseCase {
   constructor(private hasuraService: HasuraClientService) {}
 
+  async execute(
+    id: string,
+    payload: CreateActionPlanPayloadDto,
+    user: SectionUser,
+  ) {
+    if (!id) throw new ClientError(ErrorCode.ANALYSIS_NOT_FOUND);
+
+    const diagnostic = await this.getDiagnosticById(id);
+
+    if (diagnostic.analysis.partner_id !== user.partnerId)
+      throw new ClientError(ErrorCode.UNAUTHORIZED);
+
+    if (diagnostic.status !== DiagnosticStatus_enum.ANSWERS_DONE)
+      throw new ClientError(ErrorCode.ANALYSIS_NOT_READY);
+
+    const action_plan_id = await this.insertActionPlan({
+      diagnostic_id: id,
+      partner_id: diagnostic.analysis.partner_id as string,
+      customer_id: diagnostic.customer_id as string,
+      name: payload.name,
+      start_date: payload.start_date,
+      end_date: payload.end_date,
+    });
+
+    const indicatorsScores = diagnostic.scores[0].indicators_scores;
+    const [normalTasks, dependentTasks, subTasks] = await this.transformTasks(
+      payload.tasks,
+      indicatorsScores,
+    );
+
+    const tags = payload.tasks.flatMap((task) => task.tags);
+    const uniqTags = [...new Set(tags)];
+    const tagMap = new Map<string, string>();
+
+    if (uniqTags.length > 0) {
+      await Promise.all(
+        uniqTags.map(async (tagName) => {
+          const tagId = await this.insertTag({
+            name: tagName,
+            partner_id: user.partnerId,
+          });
+          tagMap.set(tagName, tagId);
+        }),
+      );
+    }
+
+    normalTasks?.length > 0 &&
+      (await Promise.all(
+        normalTasks.map(async (task) => {
+          await this.handleInsertTasks(task, action_plan_id, tagMap);
+        }),
+      ));
+
+    dependentTasks?.length > 0 &&
+      (await Promise.all(
+        dependentTasks.map(async (task) => {
+          await this.handleInsertTasks(task, action_plan_id, tagMap);
+        }),
+      ));
+
+    subTasks?.length > 0 &&
+      (await Promise.all(
+        subTasks.map(async (task) => {
+          await this.handleInsertTasks(task, action_plan_id, tagMap);
+        }),
+      ));
+
+    return action_plan_id;
+  }
+
   private async getDiagnosticById(id: string) {
     const response = await this.hasuraService.query({
       Diagnostics_by_pk: [
@@ -61,7 +131,7 @@ export class CreateActionPlanUseCase {
     return response.insert_ActionPlans_one.id as string | undefined;
   }
 
-  resolveId(currId: string | undefined, idMap: Map<string, string>) {
+  private resolveId(currId: string | undefined, idMap: Map<string, string>) {
     if (currId === undefined) return undefined;
 
     const mappedId = idMap.get(currId);
@@ -71,7 +141,7 @@ export class CreateActionPlanUseCase {
     return newId;
   }
 
-  regenarateTaskIds(tasks: CreateTaskPayloadDto[]): CreateTaskPayloadDto[] {
+  private regenarateTaskIds(tasks: CreateTaskPayloadDto[]): CreateTaskPayloadDto[] {
     const idMap = new Map<string, string>();
 
     return tasks.map((task) => {
@@ -248,13 +318,6 @@ export class CreateActionPlanUseCase {
       },
       [[], [], []],
     );
-    // return taskWithScore.sort((a, b) => {
-    //   const aOri = Number(!!a.original_task_id);
-    //   const aPar = Number(!!a.parent_task_id);
-    //   const bOri = Number(!!b.original_task_id);
-    //   const bPar = Number(!!b.parent_task_id);
-    //   return aOri + aPar - (bOri + bPar);
-    // });
   }
 
   private async handleInsertTasks(
@@ -297,75 +360,5 @@ export class CreateActionPlanUseCase {
       });
       await this.insertTagAssociations(tagPayloads);
     }
-  }
-
-  async execute(
-    id: string,
-    payload: CreateActionPlanPayloadDto,
-    user: SectionUser,
-  ) {
-    if (!id) throw new ClientError(ErrorCode.ANALYSIS_NOT_FOUND);
-
-    const diagnostic = await this.getDiagnosticById(id);
-
-    if (diagnostic.analysis.partner_id !== user.partnerId)
-      throw new ClientError(ErrorCode.UNAUTHORIZED);
-
-    if (diagnostic.status !== DiagnosticStatus_enum.ANSWERS_DONE)
-      throw new ClientError(ErrorCode.ANALYSIS_NOT_READY);
-
-    const action_plan_id = await this.insertActionPlan({
-      diagnostic_id: id,
-      partner_id: diagnostic.analysis.partner_id as string,
-      customer_id: diagnostic.customer_id as string,
-      name: payload.name,
-      start_date: payload.start_date,
-      end_date: payload.end_date,
-    });
-
-    const indicatorsScores = diagnostic.scores[0].indicators_scores;
-    const [normalTasks, dependentTasks, subTasks] = await this.transformTasks(
-      payload.tasks,
-      indicatorsScores,
-    );
-
-    const tags = payload.tasks.flatMap((task) => task.tags);
-    const uniqTags = [...new Set(tags)];
-    const tagMap = new Map<string, string>();
-
-    if (uniqTags.length > 0) {
-      await Promise.all(
-        uniqTags.map(async (tagName) => {
-          const tagId = await this.insertTag({
-            name: tagName,
-            partner_id: user.partnerId,
-          });
-          tagMap.set(tagName, tagId);
-        }),
-      );
-    }
-
-    normalTasks?.length > 0 &&
-      (await Promise.all(
-        normalTasks.map(async (task) => {
-          await this.handleInsertTasks(task, action_plan_id, tagMap);
-        }),
-      ));
-
-    dependentTasks?.length > 0 &&
-      (await Promise.all(
-        dependentTasks.map(async (task) => {
-          await this.handleInsertTasks(task, action_plan_id, tagMap);
-        }),
-      ));
-
-    subTasks?.length > 0 &&
-      (await Promise.all(
-        subTasks.map(async (task) => {
-          await this.handleInsertTasks(task, action_plan_id, tagMap);
-        }),
-      ));
-
-    return action_plan_id;
   }
 }
